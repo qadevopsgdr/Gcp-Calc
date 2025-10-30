@@ -1,0 +1,69 @@
+name: GCP VM - Deploy Calc App Image to GCP GAR
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REGION: ${{ secrets.GCP_REGION }}
+      GAR_REPO: ${{ secrets.GAR_REPO }}
+      IMAGE_NAME: calc-app
+      VM_USER: ${{ secrets.VM_USER }}
+      VM_HOST: ${{ secrets.VM_HOST }}
+      VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }} # private key for ssh login
+      SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SA_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # -----------------------
+      # Authenticate with GCP
+      # -----------------------
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          service_account_key: ${{ env.SERVICE_ACCOUNT_KEY }}
+          export_default_credentials: true
+
+      # -----------------------
+      # Configure Docker for GAR
+      # -----------------------
+      - name: Configure Docker authentication for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # -----------------------
+      # Build & Push Docker Image
+      # -----------------------
+      - name: Build and push Docker image to GAR
+        run: |
+          IMAGE_URI=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}:latest
+          echo "Building image: $IMAGE_URI"
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      # -----------------------
+      # Deploy to GCP VM
+      # -----------------------
+      - name: Deploy to GCP VM
+        run: |
+          echo "${{ env.VM_SSH_KEY }}" > key.pem
+          chmod 600 key.pem
+          
+          ssh -o StrictHostKeyChecking=no -i key.pem ${{ env.VM_USER }}@${{ env.VM_HOST }} << 'EOF'
+            echo "Pulling and deploying latest image..."
+            docker login -u oauth2accesstoken -p "$(gcloud auth print-access-token)" ${{ env.REGION }}-docker.pkg.dev
+            docker pull ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}:latest
+            docker stop calc-app || true
+            docker rm calc-app || true
+            docker run -d --name calc-app -p 80:3000 ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}:latest
+          EOF
